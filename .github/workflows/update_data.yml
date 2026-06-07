@@ -1,0 +1,37 @@
+name: Tự Động Cập Nhật Dữ Liệu Lịch Commit
+
+on:
+  schedule:
+    # Chạy tự động vào lúc 00:00 UTC mỗi ngày (khoảng 7h sáng giờ Việt Nam)
+    - cron: '0 0 * * *'
+  # Cho phép mày bấm nút chạy bằng tay trên GitHub nếu muốn test lập tức
+  workflow_dispatch: 
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Kiểm tra và nạp code từ repo
+      uses: actions/checkout@v3
+
+    - name: Cài đặt môi trường Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-level: '20'
+
+    - name: Cài đặt thư viện cần thiết
+      run: npm install axios
+
+    - name: Chạy script cào dữ liệu commit mới
+      env:
+        MY_GIT_TOKEN: ${{ secrets.MY_GIT_TOKEN }}
+      run: node fetch_data.js
+
+    - name: Tự động Commit và Push file json mới lên repo
+      run: |
+        git config --global user.name "GitHub Action Bot"
+        git config --global user.email "actions@github.com"
+        git add contributions.json
+        git commit -m "Automation: Cập nhật bản đồ quái vật mới nhất [skip ci]" || exit 0
+        git push
