@@ -5,6 +5,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Git Commit Invaders</title>
+    <script src="https://kit.fontawesome.com/a4fe6fd1e0.js" crossorigin="anonymous"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans&display=swap" rel="stylesheet">
     <style>
         body {
             margin: 0;
@@ -20,6 +24,14 @@
             overflow: hidden;
         }
 
+
+        .pixelify-sans-font {
+            font-family: "Pixelify Sans", sans-serif;
+            font-optical-sizing: auto;
+            font-weight: 400;
+            font-style: normal;
+        }
+
         canvas {
             border: 4px solid #30363d;
             background-color: #010409;
@@ -28,15 +40,42 @@
 
         h1 {
             margin-bottom: 10px;
-            font-size: 24px;
+            font-size: 40px;
             color: #58a6ff;
+        }
+
+        body {
+            position: relative;
+        }
+
+        .github-back-button {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 10px 14px;
+            background: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s ease, transform 0.2s ease;
+        }
+
+        .github-back-button:hover {
+            background: #30363d;
+            transform: translateY(-1px);
         }
     </style>
 </head>
 
 <body>
 
-    <h1>GIT COMMIT INVADERS</h1>
+    <a href="https://github.com/ThangRiel" class="github-back-button"><i class="fa-regular fa-circle-user"></i>
+        ThangRiel</a>
+
+    <h1 class="pixelify-sans-font">GIT COMMIT INVADERS</h1>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
 
     <script src="game.js"></script>

@@ -2,7 +2,7 @@ const axios = require('axios');
 const fs = require('fs');
 
 // Thay thế 2 thông tin này của mày vào
-const GITHUB_TOKEN = process.env.MY_GIT_TOKEN; // Tạo token cá nhân trên GitHub và gán vào biến môi trường MY_GIT_TOKEN
+const GITHUB_TOKEN = process.env.MY_GIT_TOKEN;
 const USERNAME = 'ThangRiel';
 
 // Dùng GraphQL API của GitHub để lấy bản đồ Contributions chi tiết từng ngày

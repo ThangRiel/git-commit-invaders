@@ -10,7 +10,7 @@ let score = 0;
 let gameOver = false;
 
 let lastShotTime = 0;
-const shotCooldown = 200;
+const shotCooldown = 300;
 let animationFrameId = null;
 
 // QUẢN LÝ QUÁI BAY CẢM TỬ
@@ -18,12 +18,39 @@ let divingEnemies = []; // Danh sách các con quái đang lao xuống
 let lastDiveTime = 0;
 const diveInterval = 1500; // Cứ mỗi 1.5 giây sẽ có quái lao xuống
 
+let isDragging = false;
+
+canvas.addEventListener("mousedown", () => {
+    isDragging = true;
+});
+
+canvas.addEventListener("mouseup", () => {
+    isDragging = false;
+});
+
+canvas.addEventListener("mouseleave", () => {
+    isDragging = false;
+});
+
+canvas.addEventListener("mousemove", (e) => {
+    if (!isDragging || gameOver) return;
+
+    const rect = canvas.getBoundingClientRect();
+    player.x = e.clientX - rect.left - player.width / 2;
+
+    // Giới hạn trong canvas
+    player.x = Math.max(
+        0,
+        Math.min(canvas.width - player.width, player.x)
+    );
+});
+
 const gitColors = ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"];
 
 function getWeekOfYear(dateString) {
     const date = new Date(dateString);
     const startOfYear = new Date(date.getFullYear(), 0, 1);
-    const startDayOfWeek = startOfYear.getDay(); 
+    const startDayOfWeek = startOfYear.getDay();
     const pastDaysOfYear = (date - startOfYear) / 86400000;
     return Math.floor((pastDaysOfYear + startDayOfWeek) / 7);
 }
@@ -33,19 +60,19 @@ async function initGame() {
     try {
         const response = await fetch('contributions.json');
         const contributions = await response.json();
-        
+
         enemies = contributions.map((item) => {
             const dateObj = new Date(item.date);
-            let dayOfWeek = dateObj.getDay(); 
+            let dayOfWeek = dateObj.getDay();
             const weekOfYear = getWeekOfYear(item.date);
 
-            const size = 15;        
-            const spacing = 4;      
+            const size = 15;
+            const spacing = 4;
             const startX = 40;
-            const startY = 60; 
+            const startY = 60;
 
             let count = item.count;
-            let level = 1; 
+            let level = 1;
             if (count > 10) level = 4;
             else if (count > 5) level = 3;
             else if (count > 2) level = 2;
@@ -55,13 +82,13 @@ async function initGame() {
                 originX: startX + weekOfYear * (size + spacing),
                 originY: startY + dayOfWeek * (size + spacing),
                 x: startX + weekOfYear * (size + spacing),
-                y: startY + dayOfWeek * (size + spacing), 
+                y: startY + dayOfWeek * (size + spacing),
                 width: size,
                 height: size,
                 colorLevel: level,
                 maxHp: count,
                 date: item.date,
-                
+
                 // Trạng thái bay của từng con
                 isDiving: false,
                 targetX: 0,
@@ -95,24 +122,50 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("keyup", (e) => keys[e.key] = false);
 
+// function handleInput() {
+//     if (gameOver) return;
+
+//     if (keys["ArrowLeft"] && player.x > 0) player.x -= player.speed;
+//     if (keys["ArrowRight"] && player.x < canvas.width - player.width) player.x += player.speed;
+
+//     if (keys[" "]) { 
+//         let currentTime = Date.now();
+//         if (currentTime - lastShotTime > shotCooldown) {
+//             bullets.push({
+//                 x: player.x + player.width / 2 - 2,
+//                 y: player.y,
+//                 width: 4,
+//                 height: 12,
+//                 speed: 9
+//             });
+//             lastShotTime = currentTime;
+//         }
+//     }
+// }
 function handleInput() {
     if (gameOver) return;
 
-    if (keys["ArrowLeft"] && player.x > 0) player.x -= player.speed;
-    if (keys["ArrowRight"] && player.x < canvas.width - player.width) player.x += player.speed;
+    if ((keys["ArrowLeft"] || keys["a"] || keys["A"]) && player.x > 0) {
+        player.x -= player.speed;
+    }
 
-    if (keys[" "]) { 
-        let currentTime = Date.now();
-        if (currentTime - lastShotTime > shotCooldown) {
-            bullets.push({
-                x: player.x + player.width / 2 - 2,
-                y: player.y,
-                width: 4,
-                height: 12,
-                speed: 9
-            });
-            lastShotTime = currentTime;
-        }
+    if ((keys["ArrowRight"] || keys["d"] || keys["D"]) &&
+        player.x < canvas.width - player.width) {
+        player.x += player.speed;
+    }
+
+    let currentTime = Date.now();
+
+    if (currentTime - lastShotTime > shotCooldown) {
+        bullets.push({
+            x: player.x + player.width / 2 - 2,
+            y: player.y,
+            width: 4,
+            height: 12,
+            speed: 9
+        });
+
+        lastShotTime = currentTime;
     }
 }
 
@@ -127,33 +180,33 @@ function updateGame() {
     });
 
     let currentTime = Date.now();
-    
+
     // TỰ ĐỘNG CHỌN QUÁI NGẪU NHIÊN ĐỂ LAO XUỐNG
     if (currentTime - lastDiveTime > diveInterval) {
         // Lọc ra những con quái còn sống và đang đứng yên trên Grid
         let aliveEnemies = enemies.filter(e => e.colorLevel > 0 && !e.isDiving);
-        
+
         if (aliveEnemies.length > 0) {
             // Chọn ngẫu nhiên 1 hoặc 2 con
             let numDivers = Math.min(2, aliveEnemies.length);
             for (let i = 0; i < numDivers; i++) {
                 let randomIndex = Math.floor(Math.random() * aliveEnemies.length);
                 let luckyEnemy = aliveEnemies[randomIndex];
-                
+
                 // Cài đặt mục tiêu: Lao thẳng vào vị trí hiện tại của người chơi
                 luckyEnemy.isDiving = true;
                 luckyEnemy.diveState = "down";
                 luckyEnemy.targetX = player.x + player.width / 2;
                 luckyEnemy.targetY = player.y;
-                
+
                 // Tính toán hướng bay (Vector vận tốc)
                 let dx = luckyEnemy.targetX - luckyEnemy.x;
                 let dy = luckyEnemy.targetY - luckyEnemy.y;
                 let distance = Math.sqrt(dx * dx + dy * dy);
-                
+
                 luckyEnemy.vx = (dx / distance) * luckyEnemy.diveSpeed;
                 luckyEnemy.vy = (dy / distance) * luckyEnemy.diveSpeed;
-                
+
                 // Xóa khỏi mảng tạm để tránh chọn trùng con đó trong cùng 1 lượt
                 aliveEnemies.splice(randomIndex, 1);
             }
@@ -213,7 +266,7 @@ function updateGame() {
                     bullet.x + bullet.width > enemy.x &&
                     bullet.y < enemy.y + enemy.height &&
                     bullet.y + bullet.height > enemy.y) {
-                    
+
                     bullets.splice(bIndex, 1);
                     enemy.colorLevel -= 1;
 
@@ -234,9 +287,9 @@ function draw() {
     if (!gameOver) {
         ctx.fillStyle = "#8b949e";
         ctx.font = "12px 'Courier New'";
-        ctx.fillText("Mon", 10, 91);   
-        ctx.fillText("Wed", 10, 129);  
-        ctx.fillText("Fri", 10, 167);  
+        ctx.fillText("Mon", 10, 91);
+        ctx.fillText("Wed", 10, 129);
+        ctx.fillText("Fri", 10, 167);
     }
 
     // Vẽ tàu người chơi
