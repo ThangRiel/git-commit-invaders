@@ -11,6 +11,7 @@ let gameOver = false;
 
 let lastShotTime = 0;
 const shotCooldown = 200;
+let animationFrameId = null;
 
 // QUẢN LÝ QUÁI BAY CẢM TỬ
 let divingEnemies = []; // Danh sách các con quái đang lao xuống
@@ -77,6 +78,10 @@ async function initGame() {
         player.x = 375;
         lastDiveTime = Date.now();
 
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
         gameLoop();
     } catch (error) {
         console.error("Lỗi rồi mày ơi!", error);
@@ -277,7 +282,7 @@ function gameLoop() {
     handleInput();
     updateGame();
     draw();
-    requestAnimationFrame(gameLoop);
+    animationFrameId = requestAnimationFrame(gameLoop);
 }
 
 initGame();
