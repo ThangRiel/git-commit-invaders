@@ -1,8 +1,5 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import fallbackContributions from '../../contributions.json';
 import { ArcadeAudio } from '../audio';
 import { createPlayerShip, PlayerShipRig } from '../models/playerShip';
@@ -32,7 +29,7 @@ const BULLET_SPEED = 40;
 const DIVE_SPEED_BASE = 9.0;
 const MAX_BULLETS = 128;
 const MAX_PICKUPS = 16;
-const MAX_PARTICLES = 480;
+const MAX_PARTICLES = 320;
 const BEST_SCORE_STORAGE_KEY = 'git_commit_invaders_best_score';
 
 const GIT_COLORS_HEX = [0x161b22, 0x0e4429, 0x006d32, 0x26a641, 0x39d353];
@@ -74,7 +71,6 @@ const _arenaPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _rayHit = new THREE.Vector3();
 
 interface Bullet {
-  active: boolean;
   x: number;
   y: number;
   z: number;
@@ -96,7 +92,6 @@ interface Bullet {
 }
 
 interface Pickup {
-  active: boolean;
   kind: UpgradeKind;
   x: number;
   y: number;
@@ -107,7 +102,6 @@ interface Pickup {
 }
 
 interface Particle {
-  active: boolean;
   x: number;
   y: number;
   z: number;
@@ -210,8 +204,6 @@ export class GameEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private composer: EffectComposer | null = null;
-  private bloomPass: UnrealBloomPass | null = null;
   private envMap: THREE.Texture | null = null;
 
   private playerRig: PlayerShipRig;
@@ -231,12 +223,21 @@ export class GameEngine {
   private frameId = 0;
   private disposed = false;
 
-  // Game state
+  // Game state & compact object pools
   private contributions: ContributionEntry[] = [];
   private enemies: EnemyState[] = [];
+  private enemyDirty: Uint8Array = new Uint8Array(0);
+  private enemiesNeedFullSync = true;
+
   private bullets: Bullet[] = [];
+  private activeBulletCount = 0;
+
   private pickups: Pickup[] = [];
+  private activePickupCount = 0;
+
   private particles: Particle[] = [];
+  private activeParticleCount = 0;
+
   private keys: Record<string, boolean> = {};
 
   private phase: GamePhase = 'loading';
@@ -292,17 +293,17 @@ export class GameEngine {
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
 
+    // Single-pass hardware-friendly WebGL setup (no expensive multi-pass bloom/shadow/transmission)
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(width, height);
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = false;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -313,38 +314,25 @@ export class GameEngine {
     this.camera.position.copy(this.currentCamPos);
     this.camera.lookAt(this.currentCamLook);
 
-    // Studio Environment Reflection (mandatory on all devices)
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.envMap = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     this.scene.environment = this.envMap;
     pmremGenerator.dispose();
 
-    // 3-Point Lighting Rig (<= 3 shadow casters, warm/cool contrast)
-    const hemiLight = new THREE.HemisphereLight(0x7dd3fc, 0x0b1220, 0.75);
+    // 3-Point Lighting Rig
+    const hemiLight = new THREE.HemisphereLight(0x7dd3fc, 0x0b1220, 0.82);
     this.scene.add(hemiLight);
 
     const keyLight = new THREE.DirectionalLight(0xfff1e0, 1.85);
     keyLight.position.set(16, 32, 18);
-    if (!this.isSoftwareGl) {
-      keyLight.castShadow = true;
-      keyLight.shadow.mapSize.set(1024, 1024);
-      keyLight.shadow.camera.left = -28;
-      keyLight.shadow.camera.right = 28;
-      keyLight.shadow.camera.top = 20;
-      keyLight.shadow.camera.bottom = -20;
-      keyLight.shadow.camera.near = 4;
-      keyLight.shadow.camera.far = 75;
-      keyLight.shadow.bias = -0.0005;
-      keyLight.shadow.normalBias = 0.02;
-    }
     this.scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.1);
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.15);
     rimLight.position.set(-20, 14, -26);
     this.scene.add(rimLight);
 
     // Build Arena & Environment
-    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const maxAniso = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     const deckTex = createDeckGridTexture(maxAniso);
     const contactShadowTex = createContactShadowTexture();
     const starTex = createStarSpriteTexture();
@@ -358,8 +346,8 @@ export class GameEngine {
     this.playerRig.group.position.set(0, 0, PLAYER_Z);
     this.scene.add(this.playerRig.group);
 
-    // Pooled Bullet InstancedMesh (supports per-instance colors & varied bolt geometries via scale)
-    const bulletGeo = new THREE.CapsuleGeometry(0.12, 0.78, 4, 8);
+    // Pooled Bullet InstancedMesh with dynamic .count
+    const bulletGeo = new THREE.CapsuleGeometry(0.13, 0.82, 4, 6);
     bulletGeo.rotateX(Math.PI / 2);
     const bulletMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -369,11 +357,11 @@ export class GameEngine {
     this.disposableMaterials.push(bulletMat);
     this.bulletMesh = new THREE.InstancedMesh(bulletGeo, bulletMat, MAX_BULLETS);
     this.bulletMesh.frustumCulled = false;
+    this.bulletMesh.count = 0;
     this.scene.add(this.bulletMesh);
 
     for (let i = 0; i < MAX_BULLETS; i++) {
       this.bullets.push({
-        active: false,
         x: 0,
         y: 0.72,
         z: 0,
@@ -393,16 +381,11 @@ export class GameEngine {
         trailAccum: 0,
         hitSet: new Set<number>(),
       });
-      _dummy.scale.set(0, 0, 0);
-      _dummy.updateMatrix();
-      this.bulletMesh.setMatrixAt(i, _dummy.matrix);
       this.bulletMesh.setColorAt(i, _color.setHex(0xff7b29));
     }
-    this.bulletMesh.instanceMatrix.needsUpdate = true;
-    if (this.bulletMesh.instanceColor) this.bulletMesh.instanceColor.needsUpdate = true;
 
-    // Pooled Upgrade Pickup InstancedMesh (rotating glowing octahedrons)
-    const pickupGeo = new THREE.OctahedronGeometry(0.55, 0);
+    // Pooled Upgrade Pickup InstancedMesh with dynamic .count
+    const pickupGeo = new THREE.OctahedronGeometry(0.56, 0);
     const pickupMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       toneMapped: false,
@@ -411,11 +394,11 @@ export class GameEngine {
     this.disposableMaterials.push(pickupMat);
     this.pickupMesh = new THREE.InstancedMesh(pickupGeo, pickupMat, MAX_PICKUPS);
     this.pickupMesh.frustumCulled = false;
+    this.pickupMesh.count = 0;
     this.scene.add(this.pickupMesh);
 
     for (let i = 0; i < MAX_PICKUPS; i++) {
       this.pickups.push({
-        active: false,
         kind: 'rapid',
         x: 0,
         y: 0.85,
@@ -424,15 +407,10 @@ export class GameEngine {
         spin: 0,
         colorHex: 0xfacc15,
       });
-      _dummy.scale.set(0, 0, 0);
-      _dummy.updateMatrix();
-      this.pickupMesh.setMatrixAt(i, _dummy.matrix);
       this.pickupMesh.setColorAt(i, _color.setHex(0xfacc15));
     }
-    this.pickupMesh.instanceMatrix.needsUpdate = true;
-    if (this.pickupMesh.instanceColor) this.pickupMesh.instanceColor.needsUpdate = true;
 
-    // Pooled Particle InstancedMesh
+    // Pooled Particle InstancedMesh with dynamic .count
     const particleGeo = new THREE.BoxGeometry(0.22, 0.22, 0.22);
     const particleMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -442,11 +420,11 @@ export class GameEngine {
     this.disposableMaterials.push(particleMat);
     this.particleMesh = new THREE.InstancedMesh(particleGeo, particleMat, MAX_PARTICLES);
     this.particleMesh.frustumCulled = false;
+    this.particleMesh.count = 0;
     this.scene.add(this.particleMesh);
 
     for (let i = 0; i < MAX_PARTICLES; i++) {
       this.particles.push({
-        active: false,
         x: 0,
         y: 0,
         z: 0,
@@ -465,25 +443,10 @@ export class GameEngine {
         g: 1,
         b: 1,
       });
-      _dummy.scale.set(0, 0, 0);
-      _dummy.updateMatrix();
-      this.particleMesh.setMatrixAt(i, _dummy.matrix);
       this.particleMesh.setColorAt(i, _color.setRGB(1, 1, 1));
     }
-    this.particleMesh.instanceMatrix.needsUpdate = true;
-    if (this.particleMesh.instanceColor) this.particleMesh.instanceColor.needsUpdate = true;
 
-    // Post-Processing Bloom on GPU only
     if (!this.isSoftwareGl) {
-      this.composer = new EffectComposer(this.renderer);
-      this.composer.addPass(new RenderPass(this.scene, this.camera));
-      this.bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(width, height),
-        0.4,
-        0.35,
-        0.78
-      );
-      this.composer.addPass(this.bloomPass);
       this.renderer.compile(this.scene, this.camera);
     }
 
@@ -504,13 +467,12 @@ export class GameEngine {
 
     const deck = new THREE.Mesh(deckGeo, deckMat);
     deck.position.set(0, 0, -4);
-    deck.receiveShadow = true;
     this.scene.add(deck);
 
     const railMat = new THREE.MeshStandardMaterial({
       color: 0x30363d,
       emissive: 0x1d4ed8,
-      emissiveIntensity: 0.25,
+      emissiveIntensity: 0.3,
       metalness: 0.75,
       roughness: 0.3,
     });
@@ -532,7 +494,7 @@ export class GameEngine {
     const trackMat = new THREE.MeshBasicMaterial({
       color: 0x58a6ff,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.38,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
@@ -575,7 +537,7 @@ export class GameEngine {
   }
 
   private buildStarField(starTex: THREE.CanvasTexture): THREE.Points {
-    const count = 420;
+    const count = 240;
     const positions = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
       positions[i * 3] = (Math.random() - 0.5) * 140;
@@ -585,10 +547,10 @@ export class GameEngine {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     const mat = new THREE.PointsMaterial({
-      size: 0.75,
+      size: 0.65,
       map: starTex,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.7,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -630,7 +592,7 @@ export class GameEngine {
       (this.enemyCoreMesh.material as THREE.Material).dispose();
     }
 
-    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const maxAniso = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     const blockTex = createBlockCircuitTexture(maxAniso);
     this.disposableTextures.push(blockTex);
 
@@ -654,17 +616,15 @@ export class GameEngine {
 
     const bodyMat = new THREE.MeshStandardMaterial({
       map: blockTex,
-      roughness: 0.36,
+      roughness: 0.34,
       metalness: 0.28,
     });
 
     this.enemyBodyMesh = new THREE.InstancedMesh(bodyGeo, bodyMat, count);
-    this.enemyBodyMesh.castShadow = !this.isSoftwareGl;
-    this.enemyBodyMesh.receiveShadow = true;
     this.enemyBodyMesh.frustumCulled = false;
     this.scene.add(this.enemyBodyMesh);
 
-    const coreGeo = new THREE.BoxGeometry(0.42, 0.09, 0.42);
+    const coreGeo = new THREE.BoxGeometry(0.42, 0.1, 0.42);
     const coreMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       toneMapped: false,
@@ -672,6 +632,8 @@ export class GameEngine {
     this.enemyCoreMesh = new THREE.InstancedMesh(coreGeo, coreMat, count);
     this.enemyCoreMesh.frustumCulled = false;
     this.scene.add(this.enemyCoreMesh);
+
+    this.enemyDirty = new Uint8Array(count);
   }
 
   public resetGame(): void {
@@ -716,16 +678,12 @@ export class GameEngine {
       };
     });
 
-    for (const b of this.bullets) {
-      b.active = false;
-      b.hitSet.clear();
-    }
-    for (const pk of this.pickups) {
-      pk.active = false;
-    }
-    for (const p of this.particles) {
-      p.active = false;
-    }
+    this.activeBulletCount = 0;
+    this.activePickupCount = 0;
+    this.activeParticleCount = 0;
+    this.bulletMesh.count = 0;
+    this.pickupMesh.count = 0;
+    this.particleMesh.count = 0;
 
     this.score = 0;
     this.totalCommits = this.enemies.length;
@@ -746,11 +704,9 @@ export class GameEngine {
     this.lastShotTime = performance.now();
     this.lastDiveTime = performance.now();
     this.phase = 'playing';
+    this.enemiesNeedFullSync = true;
 
     this.syncEnemyInstances(0);
-    this.syncBulletInstances();
-    this.syncPickupInstances();
-    this.syncParticleInstances();
     this.emitHud();
   }
 
@@ -830,31 +786,38 @@ export class GameEngine {
       scaleZ?: number;
     }
   ): void {
-    for (let i = 0; i < MAX_BULLETS; i++) {
-      const b = this.bullets[i];
-      if (!b.active) {
-        b.active = true;
-        b.x = x;
-        b.y = 0.72;
-        b.z = z;
-        b.prevX = x;
-        b.prevZ = z;
-        b.baseX = x;
-        b.vx = vx;
-        b.vz = vz;
-        b.waveAmp = options?.waveAmp ?? 0;
-        b.wavePhase = options?.wavePhase ?? 0;
-        b.waveFreq = options?.waveFreq ?? 14;
-        b.pierceLeft = options?.pierceLeft ?? 1;
-        b.scaleX = options?.scaleX ?? 1;
-        b.scaleY = options?.scaleY ?? 1;
-        b.scaleZ = options?.scaleZ ?? 1;
-        b.colorHex = colorHex;
-        b.trailAccum = 0;
-        b.hitSet.clear();
-        return;
-      }
+    if (this.activeBulletCount >= MAX_BULLETS) return;
+    const b = this.bullets[this.activeBulletCount];
+    this.activeBulletCount++;
+
+    b.x = x;
+    b.y = 0.72;
+    b.z = z;
+    b.prevX = x;
+    b.prevZ = z;
+    b.baseX = x;
+    b.vx = vx;
+    b.vz = vz;
+    b.waveAmp = options?.waveAmp ?? 0;
+    b.wavePhase = options?.wavePhase ?? 0;
+    b.waveFreq = options?.waveFreq ?? 14;
+    b.pierceLeft = options?.pierceLeft ?? 1;
+    b.scaleX = options?.scaleX ?? 1;
+    b.scaleY = options?.scaleY ?? 1;
+    b.scaleZ = options?.scaleZ ?? 1;
+    b.colorHex = colorHex;
+    b.trailAccum = 0;
+    b.hitSet.clear();
+  }
+
+  private removeBulletAt(index: number): void {
+    const lastIdx = this.activeBulletCount - 1;
+    if (index !== lastIdx) {
+      const tmp = this.bullets[index];
+      this.bullets[index] = this.bullets[lastIdx];
+      this.bullets[lastIdx] = tmp;
     }
+    this.activeBulletCount = lastIdx;
   }
 
   private fireVolley(): void {
@@ -944,11 +907,7 @@ export class GameEngine {
   }
 
   private maybeSpawnPickup(x: number, z: number, initialLevel: number): void {
-    let activeCount = 0;
-    for (let i = 0; i < MAX_PICKUPS; i++) {
-      if (this.pickups[i].active) activeCount++;
-    }
-    if (activeCount >= 5) return;
+    if (this.activePickupCount >= 5 || this.activePickupCount >= MAX_PICKUPS) return;
 
     const dropChance = 0.18 + (initialLevel - 1) * 0.1;
     if (Math.random() > dropChance) return;
@@ -956,20 +915,25 @@ export class GameEngine {
     const kinds: UpgradeKind[] = ['rapid', 'multishot', 'shield', 'double_score', 'weapon'];
     const kind = kinds[Math.floor(Math.random() * kinds.length)];
 
-    for (let i = 0; i < MAX_PICKUPS; i++) {
-      const pk = this.pickups[i];
-      if (!pk.active) {
-        pk.active = true;
-        pk.kind = kind;
-        pk.x = THREE.MathUtils.clamp(x, -ARENA_HALF_WIDTH + 1, ARENA_HALF_WIDTH - 1);
-        pk.y = 0.9;
-        pk.z = z;
-        pk.vz = 6.2 + Math.random() * 1.4;
-        pk.spin = Math.random() * Math.PI * 2;
-        pk.colorHex = UPGRADE_COLORS[kind];
-        return;
-      }
+    const pk = this.pickups[this.activePickupCount];
+    this.activePickupCount++;
+    pk.kind = kind;
+    pk.x = THREE.MathUtils.clamp(x, -ARENA_HALF_WIDTH + 1, ARENA_HALF_WIDTH - 1);
+    pk.y = 0.9;
+    pk.z = z;
+    pk.vz = 6.2 + Math.random() * 1.4;
+    pk.spin = Math.random() * Math.PI * 2;
+    pk.colorHex = UPGRADE_COLORS[kind];
+  }
+
+  private removePickupAt(index: number): void {
+    const lastIdx = this.activePickupCount - 1;
+    if (index !== lastIdx) {
+      const tmp = this.pickups[index];
+      this.pickups[index] = this.pickups[lastIdx];
+      this.pickups[lastIdx] = tmp;
     }
+    this.activePickupCount = lastIdx;
   }
 
   private applyUpgrade(kind: UpgradeKind): void {
@@ -1002,7 +966,7 @@ export class GameEngine {
 
     this.upgradeBannerTimer = 4.5;
     this.audio.playPowerUp();
-    this.spawnParticles(this.playerX, 0.9, PLAYER_Z, 22, UPGRADE_COLORS[kind], 1.1, 1.0);
+    this.spawnParticles(this.playerX, 0.9, PLAYER_Z, 16, UPGRADE_COLORS[kind], 1.1, 1.0);
     this.emitHud();
   }
 
@@ -1016,39 +980,47 @@ export class GameEngine {
     sizeScale = 1.0
   ): void {
     _color.setHex(hexColor);
-    let spawned = 0;
-    for (let i = 0; i < MAX_PARTICLES && spawned < count; i++) {
-      const p = this.particles[i];
-      if (!p.active) {
-        p.active = true;
-        p.x = x;
-        p.y = y;
-        p.z = z;
-        const angle = Math.random() * Math.PI * 2;
-        const horiz = (2.2 + Math.random() * 6.5) * speedScale;
-        p.vx = Math.cos(angle) * horiz;
-        p.vy = (2.5 + Math.random() * 6.0) * speedScale;
-        p.vz = Math.sin(angle) * horiz;
-        p.rx = Math.random() * Math.PI;
-        p.ry = Math.random() * Math.PI;
-        p.rz = Math.random() * Math.PI;
-        p.vrx = (Math.random() - 0.5) * 14;
-        p.vry = (Math.random() - 0.5) * 14;
-        p.maxLife = 0.32 + Math.random() * 0.38;
-        p.life = p.maxLife;
-        p.size = (0.65 + Math.random() * 0.9) * sizeScale;
-        p.r = _color.r;
-        p.g = _color.g;
-        p.b = _color.b;
-        spawned++;
-      }
+    for (let s = 0; s < count && this.activeParticleCount < MAX_PARTICLES; s++) {
+      const p = this.particles[this.activeParticleCount];
+      this.activeParticleCount++;
+
+      p.x = x;
+      p.y = y;
+      p.z = z;
+      const angle = Math.random() * Math.PI * 2;
+      const horiz = (2.2 + Math.random() * 6.5) * speedScale;
+      p.vx = Math.cos(angle) * horiz;
+      p.vy = (2.5 + Math.random() * 6.0) * speedScale;
+      p.vz = Math.sin(angle) * horiz;
+      p.rx = Math.random() * Math.PI;
+      p.ry = Math.random() * Math.PI;
+      p.rz = Math.random() * Math.PI;
+      p.vrx = (Math.random() - 0.5) * 14;
+      p.vry = (Math.random() - 0.5) * 14;
+      p.maxLife = 0.28 + Math.random() * 0.34;
+      p.life = p.maxLife;
+      p.size = (0.65 + Math.random() * 0.85) * sizeScale;
+      p.r = _color.r;
+      p.g = _color.g;
+      p.b = _color.b;
     }
+  }
+
+  private removeParticleAt(index: number): void {
+    const lastIdx = this.activeParticleCount - 1;
+    if (index !== lastIdx) {
+      const tmp = this.particles[index];
+      this.particles[index] = this.particles[lastIdx];
+      this.particles[lastIdx] = tmp;
+    }
+    this.activeParticleCount = lastIdx;
   }
 
   private damageEnemy(e: EnemyState, hitX: number, hitZ: number): boolean {
     const prevHex = GIT_COLORS_HEX[e.colorLevel];
     e.colorLevel -= 1;
     e.hitFlash = 1.0;
+    this.enemyDirty[e.index] = 1;
 
     if (e.colorLevel === 0) {
       const multiplier = this.doubleScoreLeft > 0 ? 2 : 1;
@@ -1066,7 +1038,7 @@ export class GameEngine {
       e.isDiving = false;
       e.diveState = 'none';
       this.cameraShake = Math.min(0.45, this.cameraShake + 0.14);
-      this.spawnParticles(e.x, e.y + 0.6, e.z, 18, prevHex, 1.15, 1.15);
+      this.spawnParticles(e.x, e.y + 0.6, e.z, 12, prevHex, 1.1, 1.1);
       this.maybeSpawnPickup(e.x, e.z, e.initialLevel);
       this.audio.playDestroy();
 
@@ -1077,7 +1049,7 @@ export class GameEngine {
       return true;
     }
 
-    this.spawnParticles(hitX, 0.72, hitZ, 7, prevHex, 0.75, 0.7);
+    this.spawnParticles(hitX, 0.72, hitZ, 4, prevHex, 0.75, 0.7);
     this.audio.playHit();
     return false;
   }
@@ -1087,7 +1059,6 @@ export class GameEngine {
     this.starField.position.z = (elapsed * 0.8) % 12;
 
     if (this.phase === 'playing') {
-      // Tick upgrade timers
       let timersChanged = false;
       if (this.rapidLeft > 0) {
         this.rapidLeft = Math.max(0, this.rapidLeft - dt);
@@ -1137,7 +1108,7 @@ export class GameEngine {
       this.playerX = THREE.MathUtils.clamp(this.playerX, -ARENA_HALF_WIDTH, ARENA_HALF_WIDTH);
       this.playerVx = dt > 0 ? (this.playerX - prevX) / dt : 0;
 
-      // 2. Shooting (Auto-fire or Spacebar, scaled by Overdrive & weapon mode)
+      // 2. Shooting
       const wantsFire = this.autoFire || Boolean(this.keys[' ']);
       let baseCooldown = SHOT_COOLDOWN_MS;
       if (this.fireMode === 'rail') baseCooldown = 390;
@@ -1149,10 +1120,9 @@ export class GameEngine {
         this.lastShotTime = now;
       }
 
-      // 3. Move Bullets (record prevX / prevZ for zero-tunneling swept hit detection)
-      for (let i = 0; i < MAX_BULLETS; i++) {
+      // 3. Move Active Bullets (swap-remove on exit)
+      for (let i = this.activeBulletCount - 1; i >= 0; i--) {
         const b = this.bullets[i];
-        if (!b.active) continue;
         b.prevX = b.x;
         b.prevZ = b.z;
         b.baseX += b.vx * dt;
@@ -1164,36 +1134,35 @@ export class GameEngine {
           b.x = b.baseX;
         }
 
-        // Subtle plasma trail for railgun & helix shots
         if (b.pierceLeft > 1 || b.waveAmp > 0) {
           b.trailAccum += dt;
-          if (b.trailAccum >= 0.035) {
+          if (b.trailAccum >= 0.055) {
             b.trailAccum = 0;
             this.spawnParticles(b.x, b.y, b.z + 0.3, 1, b.colorHex, 0.2, 0.45);
           }
         }
 
         if (b.z < -20 || Math.abs(b.x) > ARENA_HALF_WIDTH + 6) {
-          b.active = false;
+          this.removeBulletAt(i);
         }
       }
 
-      // 4. Update Falling Upgrade Pickups & Catch Check
-      for (let i = 0; i < MAX_PICKUPS; i++) {
+      // 4. Update Falling Upgrade Pickups
+      for (let i = this.activePickupCount - 1; i >= 0; i--) {
         const pk = this.pickups[i];
-        if (!pk.active) continue;
         pk.z += pk.vz * dt;
         pk.spin += dt * 3.4;
         pk.y = 0.9 + Math.sin(elapsed * 5 + i) * 0.16;
 
         if (Math.abs(pk.x - this.playerX) < 2.25 && Math.abs(pk.z - PLAYER_Z) < 1.55) {
-          pk.active = false;
-          this.applyUpgrade(pk.kind);
+          const kind = pk.kind;
+          this.removePickupAt(i);
+          this.applyUpgrade(kind);
           continue;
         }
 
         if (pk.z > PLAYER_Z + 5.5) {
-          pk.active = false;
+          this.removePickupAt(i);
         }
       }
 
@@ -1223,6 +1192,7 @@ export class GameEngine {
             const dist = Math.hypot(dx, dz) || 1;
             diver.vx = (dx / dist) * diver.diveSpeed;
             diver.vz = (dz / dist) * diver.diveSpeed;
+            this.enemyDirty[diver.index] = 1;
 
             candidates.splice(pickIdx, 1);
           }
@@ -1233,32 +1203,38 @@ export class GameEngine {
       }
 
       // 6. Update Diving Enemies & Player Collision
+      let hasActiveDivers = false;
       for (let i = 0; i < this.enemies.length; i++) {
         const e = this.enemies[i];
         if (e.hitFlash > 0) {
           e.hitFlash = Math.max(0, e.hitFlash - dt * 7.5);
+          this.enemyDirty[i] = 1;
         }
 
         if (e.colorLevel <= 0 || !e.isDiving) continue;
 
+        hasActiveDivers = true;
+        this.enemyDirty[i] = 1;
         e.spinAngle += dt * 4.5;
 
         if (e.diveState === 'down') {
           e.x += e.vx * dt;
           e.z += e.vz * dt;
-          const progress = THREE.MathUtils.clamp((e.z - e.originZ) / (e.targetZ - e.originZ || 1), 0, 1);
+          const progress = THREE.MathUtils.clamp(
+            (e.z - e.originZ) / (e.targetZ - e.originZ || 1),
+            0,
+            1
+          );
           e.y = 0.04 + Math.sin(progress * Math.PI) * 1.4 + 0.35;
 
-          // Check collision with player ship
           if (Math.abs(e.x - this.playerX) < 1.85 && Math.abs(e.z - PLAYER_Z) < 1.25) {
             if (this.hasShield || this.shieldInvulnLeft > 0) {
               if (this.hasShield) {
                 this.hasShield = false;
                 this.shieldInvulnLeft = 0.85;
                 this.audio.playShieldBreak();
-                this.spawnParticles(this.playerX, 0.9, PLAYER_Z, 30, 0x38bdf8, 1.35, 1.1);
+                this.spawnParticles(this.playerX, 0.9, PLAYER_Z, 20, 0x38bdf8, 1.3, 1.05);
               }
-              // Shatter the diving enemy on shield impact
               e.colorLevel = 1;
               this.damageEnemy(e, e.x, e.z);
               hudDirty = true;
@@ -1291,24 +1267,45 @@ export class GameEngine {
             e.isDiving = false;
             e.diveState = 'none';
             e.spinAngle = 0;
+            this.enemyDirty[i] = 1;
             hudDirty = true;
           }
         }
       }
 
-      // 7. Continuous Swept Segment-vs-AABB Bullet Collision (zero tunneling, ultra-responsive)
-      for (let bi = 0; bi < MAX_BULLETS; bi++) {
+      // 7. Continuous Swept Segment-vs-AABB Bullet Collision with Fast Bounds Early-Out
+      for (let bi = this.activeBulletCount - 1; bi >= 0; bi--) {
         const b = this.bullets[bi];
-        if (!b.active) continue;
+        const minBZ = b.z < b.prevZ ? b.z : b.prevZ;
+        const maxBZ = b.z > b.prevZ ? b.z : b.prevZ;
+
+        // O(1) early-out when no divers are out and bullet is below the grid
+        if (!hasActiveDivers && minBZ > -9.0) {
+          continue;
+        }
+
+        const minBX = b.x < b.prevX ? b.x : b.prevX;
+        const maxBX = b.x > b.prevX ? b.x : b.prevX;
+        const padW = (b.scaleX - 1) * 0.14;
+        const padZ = (b.scaleZ - 1) * 0.18;
 
         for (let ei = 0; ei < this.enemies.length; ei++) {
           const e = this.enemies[ei];
           if (e.colorLevel <= 0) continue;
           if (b.pierceLeft > 1 && b.hitSet.has(e.index)) continue;
 
-          // Expanded hitbox accounting for bullet capsule width, bloom, and diving motion
-          const hitHalfW = (e.isDiving ? 0.72 : 0.64) + (b.scaleX - 1) * 0.14;
-          const hitHalfZ = (e.isDiving ? 0.78 : 0.7) + (b.scaleZ - 1) * 0.18;
+          const hitHalfW = (e.isDiving ? 0.72 : 0.64) + padW;
+          const hitHalfZ = (e.isDiving ? 0.78 : 0.7) + padZ;
+
+          // Cheap AABB rejection before swept slab test
+          if (
+            e.z < minBZ - hitHalfZ ||
+            e.z > maxBZ + hitHalfZ ||
+            e.x < minBX - hitHalfW ||
+            e.x > maxBX + hitHalfW
+          ) {
+            continue;
+          }
 
           if (segmentIntersectsAABB(b.prevX, b.prevZ, b.x, b.z, e.x, e.z, hitHalfW, hitHalfZ)) {
             b.hitSet.add(e.index);
@@ -1318,7 +1315,7 @@ export class GameEngine {
             if (killed) hudDirty = true;
 
             if (b.pierceLeft <= 0) {
-              b.active = false;
+              this.removeBulletAt(bi);
               break;
             }
           }
@@ -1369,13 +1366,12 @@ export class GameEngine {
     muzzleMat.opacity = this.muzzleFlash * 0.75;
     this.playerRig.muzzleGlow.scale.setScalar(0.6 + this.muzzleFlash * 0.7);
 
-    // 9. Update Particles
-    for (let i = 0; i < MAX_PARTICLES; i++) {
+    // 9. Update Active Particles (swap-remove on expiry)
+    for (let i = this.activeParticleCount - 1; i >= 0; i--) {
       const p = this.particles[i];
-      if (!p.active) continue;
       p.life -= dt;
       if (p.life <= 0) {
-        p.active = false;
+        this.removeParticleAt(i);
         continue;
       }
       p.vy -= 18 * dt;
@@ -1437,7 +1433,7 @@ export class GameEngine {
     );
     this.camera.lookAt(this.currentCamLook);
 
-    // 11. Sync InstancedMeshes
+    // 11. Sync InstancedMeshes (dirty-only for enemies, .count-compacted for pools)
     this.syncEnemyInstances(elapsed);
     this.syncBulletInstances();
     this.syncPickupInstances();
@@ -1447,8 +1443,8 @@ export class GameEngine {
   private triggerGameOver(): void {
     this.phase = 'gameover';
     this.cameraShake = 0.9;
-    this.spawnParticles(this.playerX, 0.8, PLAYER_Z, 44, 0x38bdf8, 1.5, 1.35);
-    this.spawnParticles(this.playerX, 0.8, PLAYER_Z, 26, 0xf97316, 1.3, 1.1);
+    this.spawnParticles(this.playerX, 0.8, PLAYER_Z, 28, 0x38bdf8, 1.4, 1.25);
+    this.spawnParticles(this.playerX, 0.8, PLAYER_Z, 18, 0xf97316, 1.2, 1.0);
     this.audio.playGameOver();
     this.emitHud();
   }
@@ -1456,7 +1452,14 @@ export class GameEngine {
   private syncEnemyInstances(elapsed: number): void {
     if (!this.enemyBodyMesh || !this.enemyCoreMesh) return;
 
+    let anyUpdated = false;
+    const full = this.enemiesNeedFullSync;
+
     for (let i = 0; i < this.enemies.length; i++) {
+      if (!full && this.enemyDirty[i] === 0) continue;
+      this.enemyDirty[i] = 0;
+      anyUpdated = true;
+
       const e = this.enemies[i];
       if (e.colorLevel <= 0) {
         _dummy.scale.set(0, 0, 0);
@@ -1467,9 +1470,7 @@ export class GameEngine {
       }
 
       const h = LEVEL_HEIGHTS[e.colorLevel];
-      const bob = e.isDiving ? 0 : Math.sin(elapsed * 2.2 + e.originX * 0.35 + e.originZ * 0.4) * 0.04;
-
-      _dummy.position.set(e.x, e.y + bob, e.z);
+      _dummy.position.set(e.x, e.y, e.z);
       if (e.isDiving) {
         _dummy.rotation.set(0.32, e.spinAngle, Math.sin(e.spinAngle) * 0.15);
       } else {
@@ -1489,7 +1490,7 @@ export class GameEngine {
       }
       this.enemyBodyMesh.setColorAt(i, _color);
 
-      _dummy.position.set(e.x, e.y + bob + h + 0.07, e.z);
+      _dummy.position.set(e.x, e.y + h + 0.07, e.z);
       _dummy.scale.set(1, 1, 1);
       _dummy.updateMatrix();
       this.enemyCoreMesh.setMatrixAt(i, _dummy.matrix);
@@ -1502,63 +1503,61 @@ export class GameEngine {
       this.enemyCoreMesh.setColorAt(i, _color);
     }
 
-    this.enemyBodyMesh.instanceMatrix.needsUpdate = true;
-    if (this.enemyBodyMesh.instanceColor) this.enemyBodyMesh.instanceColor.needsUpdate = true;
-    this.enemyCoreMesh.instanceMatrix.needsUpdate = true;
-    if (this.enemyCoreMesh.instanceColor) this.enemyCoreMesh.instanceColor.needsUpdate = true;
+    this.enemiesNeedFullSync = false;
+
+    if (anyUpdated) {
+      this.enemyBodyMesh.instanceMatrix.needsUpdate = true;
+      if (this.enemyBodyMesh.instanceColor) this.enemyBodyMesh.instanceColor.needsUpdate = true;
+      this.enemyCoreMesh.instanceMatrix.needsUpdate = true;
+      if (this.enemyCoreMesh.instanceColor) this.enemyCoreMesh.instanceColor.needsUpdate = true;
+    }
   }
 
   private syncBulletInstances(): void {
-    for (let i = 0; i < MAX_BULLETS; i++) {
+    const count = this.activeBulletCount;
+    this.bulletMesh.count = count;
+    if (count === 0) return;
+
+    for (let i = 0; i < count; i++) {
       const b = this.bullets[i];
-      if (!b.active) {
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.bulletMesh.setMatrixAt(i, _dummy.matrix);
-        continue;
-      }
       _dummy.position.set(b.x, b.y, b.z);
       const yaw = Math.atan2(-(b.x - b.prevX), -(b.z - b.prevZ));
       _dummy.rotation.set(0, yaw, 0);
       _dummy.scale.set(b.scaleX, b.scaleY, b.scaleZ);
       _dummy.updateMatrix();
       this.bulletMesh.setMatrixAt(i, _dummy.matrix);
-      this.bulletMesh.setColorAt(i, _color.setHex(b.colorHex).multiplyScalar(1.35));
+      this.bulletMesh.setColorAt(i, _color.setHex(b.colorHex).multiplyScalar(1.2));
     }
     this.bulletMesh.instanceMatrix.needsUpdate = true;
     if (this.bulletMesh.instanceColor) this.bulletMesh.instanceColor.needsUpdate = true;
   }
 
   private syncPickupInstances(): void {
-    for (let i = 0; i < MAX_PICKUPS; i++) {
+    const count = this.activePickupCount;
+    this.pickupMesh.count = count;
+    if (count === 0) return;
+
+    for (let i = 0; i < count; i++) {
       const pk = this.pickups[i];
-      if (!pk.active) {
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.pickupMesh.setMatrixAt(i, _dummy.matrix);
-        continue;
-      }
       const pulse = 1.0 + Math.sin(pk.spin * 2) * 0.14;
       _dummy.position.set(pk.x, pk.y, pk.z);
       _dummy.rotation.set(pk.spin * 0.7, pk.spin, 0);
       _dummy.scale.setScalar(pulse);
       _dummy.updateMatrix();
       this.pickupMesh.setMatrixAt(i, _dummy.matrix);
-      this.pickupMesh.setColorAt(i, _color.setHex(pk.colorHex).multiplyScalar(1.35));
+      this.pickupMesh.setColorAt(i, _color.setHex(pk.colorHex).multiplyScalar(1.25));
     }
     this.pickupMesh.instanceMatrix.needsUpdate = true;
     if (this.pickupMesh.instanceColor) this.pickupMesh.instanceColor.needsUpdate = true;
   }
 
   private syncParticleInstances(): void {
-    for (let i = 0; i < MAX_PARTICLES; i++) {
+    const count = this.activeParticleCount;
+    this.particleMesh.count = count;
+    if (count === 0) return;
+
+    for (let i = 0; i < count; i++) {
       const p = this.particles[i];
-      if (!p.active) {
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.particleMesh.setMatrixAt(i, _dummy.matrix);
-        continue;
-      }
       const scale = p.size * (p.life / p.maxLife);
       _dummy.position.set(p.x, p.y, p.z);
       _dummy.rotation.set(p.rx, p.ry, p.rz);
@@ -1604,12 +1603,7 @@ export class GameEngine {
       const elapsed = this.clock.getElapsedTime();
 
       this.updateGame(dt, elapsed);
-
-      if (this.isSoftwareGl || !this.composer) {
-        this.renderer.render(this.scene, this.camera);
-      } else {
-        this.composer.render();
-      }
+      this.renderer.render(this.scene, this.camera);
 
       if (this.isSoftwareGl) {
         this.afterDraw(tick);
@@ -1678,14 +1672,8 @@ export class GameEngine {
     const height = this.container.clientHeight || window.innerHeight;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(width, height);
-    if (this.composer) {
-      this.composer.setSize(width, height);
-    }
-    if (this.bloomPass) {
-      this.bloomPass.resolution.set(width, height);
-    }
   };
 
   private onContextLost = (e: Event): void => {
@@ -1742,7 +1730,6 @@ export class GameEngine {
     this.disposableMaterials.forEach((m) => m.dispose());
     this.disposableTextures.forEach((t) => t.dispose());
     this.envMap?.dispose();
-    this.composer?.dispose();
     this.renderer.dispose();
 
     if (canvas.parentElement === this.container) {

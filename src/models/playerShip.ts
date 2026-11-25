@@ -12,7 +12,7 @@ export interface PlayerShipRig {
 }
 
 export function createPlayerShip(
-  isSoftwareGl: boolean,
+  _isSoftwareGl: boolean,
   contactShadowTexture: THREE.CanvasTexture
 ): PlayerShipRig {
   const group = new THREE.Group();
@@ -41,15 +41,13 @@ export function createPlayerShip(
   });
   const canopyMat = new THREE.MeshPhysicalMaterial({
     color: 0x38bdf8,
-    metalness: 0.05,
-    roughness: 0.08,
+    metalness: 0.18,
+    roughness: 0.06,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.05,
-    ior: 1.55,
-    thickness: 0.8,
-    transmission: isSoftwareGl ? 0 : 0.82,
+    clearcoatRoughness: 0.04,
+    envMapIntensity: 1.6,
     transparent: true,
-    opacity: isSoftwareGl ? 0.55 : 1.0,
+    opacity: 0.78,
   });
   const cannonMat = new THREE.MeshStandardMaterial({
     color: 0xe2e8f0,
@@ -104,8 +102,6 @@ export function createPlayerShip(
   geometries.push(fuselageGeo);
 
   const fuselageMesh = new THREE.Mesh(fuselageGeo, primaryArmorMat);
-  fuselageMesh.castShadow = !isSoftwareGl;
-  fuselageMesh.receiveShadow = true;
   hullPivot.add(fuselageMesh);
 
   // 2. Secondary Read: Twin swept delta wings
@@ -128,14 +124,10 @@ export function createPlayerShip(
   geometries.push(rightWingGeo);
 
   const rightWing = new THREE.Mesh(rightWingGeo, darkFrameMat);
-  rightWing.castShadow = !isSoftwareGl;
-  rightWing.receiveShadow = true;
   hullPivot.add(rightWing);
 
   const leftWing = new THREE.Mesh(rightWingGeo, darkFrameMat);
   leftWing.scale.x = -1;
-  leftWing.castShadow = !isSoftwareGl;
-  leftWing.receiveShadow = true;
   hullPivot.add(leftWing);
 
   // 3. Wingtip stabilizer fins
