@@ -564,7 +564,7 @@ export class GameEngine {
 
   private async loadAndStart(): Promise<void> {
     try {
-      const response = await fetch('/contributions.json');
+      const response = await fetch(`${import.meta.env.BASE_URL}contributions.json`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
